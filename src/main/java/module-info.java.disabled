@@ -1,0 +1,17 @@
+module com.hanpf.clearai {
+    // 1. 声明我们需要第三方库
+    requires com.google.gson;
+
+    // 2. 声明我们的应用需要 LangChain4j 的哪些模块 (如果未来用到)
+    // requires langchain4j;
+    // requires langchain4j.open.ai;
+
+    // 3. 声明我们要把哪些包暴露给外部
+    opens com.hanpf.clearai to com.google.gson;
+    opens com.hanpf.clearai.config to com.google.gson;
+    exports com.hanpf.clearai;
+    exports com.hanpf.clearai.config;
+    exports com.hanpf.clearai.tools;
+    exports com.hanpf.clearai.service;
+    exports com.hanpf.clearai.test;
+}
