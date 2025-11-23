@@ -19,9 +19,15 @@ public class AIConfigManager {
     private static void loadConfig() {
         // 只支持外置JSON配置文件 setting.json
         externalConfig = JsonConfigParser.loadExternalConfig();
+
+        // 记录配置加载到日志
         if (externalConfig != null && externalConfig.getEnv() != null) {
-            System.out.println("已加载配置文件: " + JsonConfigParser.getConfigFilePath());
+            com.hanpf.clearai.utils.ClearAILogger.logConfiguration("External config loaded",
+                "Provider: " + getProviderName() +
+                ", Model: " + getCurrentModel() +
+                ", URL: " + getApiUrl());
         } else {
+            com.hanpf.clearai.utils.ClearAILogger.error("Configuration loading failed", null);
             System.err.println("未找到配置文件 setting.json，程序将无法正常运行");
             System.err.println("请在程序同级目录创建 setting.json 文件并配置AI信息");
         }

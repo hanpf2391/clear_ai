@@ -39,13 +39,7 @@
             <artifactId>fastjson</artifactId>
             <version>1.2.83</version>
         </dependency>
-        <!-- HTTP客户端依赖 -->
-        <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>okhttp</artifactId>
-            <version>4.12.0</version>
-        </dependency>
-
+        
         <!-- JSON处理依赖 -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
@@ -73,6 +67,37 @@
             <artifactId>jline-reader</artifactId>
             <version>3.21.0</version>
         </dependency>
+
+        
+        <!-- LangChain4j 核心依赖 -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-core</artifactId>
+            <version>1.0.0-alpha1</version>
+        </dependency>
+
+        <!-- LangChain4j OpenAI依赖（支持兼容的API格式） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
+            <version>1.0.0-alpha1</version>
+        </dependency>
+
+        <!-- Jackson JSON处理 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.15.2</version>
+        </dependency>
+
+        <!-- SLF4J日志 -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.7</version>
+        </dependency>
+
+        <!-- 如果需要支持智普AI，可能需要自定义provider，这里先用OpenAI的 -->
     </dependencies>
 
     <profiles>

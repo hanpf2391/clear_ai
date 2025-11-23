@@ -1,0 +1,8 @@
+# ClearAI 用户白名单文件
+# 每行一个路径，支持通配符 * 和 ?
+# 以 # 开头的行为注释
+# 示例:
+# C:\Users\username\Important\*
+# D:\Projects\backup\*.zip
+# %USERPROFILE%\Documents\*.pdf
+

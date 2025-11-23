@@ -11,12 +11,21 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM 检查编译状态
-if not exist "target\classes\com\hanpf\clearai\cli\ClaudeTUI.class" (
-    echo Compiling project...
-    call mvn clean compile -q
+REM 每次都重新编译以确保使用最新代码
+echo Compiling project with latest changes...
+call mvn clean compile -q
+if %errorlevel% neq 0 (
+    echo Compilation failed
+    pause
+    exit /b 1
+)
+
+REM 如果依赖不存在，复制依赖
+if not exist "target\dependency" (
+    echo Copying dependencies...
+    call mvn dependency:copy-dependencies -q
     if %errorlevel% neq 0 (
-        echo Compilation failed
+        echo Failed to copy dependencies
         pause
         exit /b 1
     )

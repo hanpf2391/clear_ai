@@ -1,0 +1,11 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "43365548e8ba4e6d98bf9506dd436fdb.PJgEONyl2iT1PvY0",
+    "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
+    "API_TIMEOUT_MS": 600000,
+    "MAX_TOKENS": 3000,
+    "ANTHROPIC_MODEL": "glm-4.5-air",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm-4.5-air"
+  }
+}

@@ -1,0 +1,24 @@
+# ClearAI 系统白名单文件
+# 此文件包含系统重要目录，不建议修改
+
+# Windows系统目录
+C:\Windows\*
+C:\Program Files\*
+C:\Program Files (x86)\*
+C:\ProgramData\*
+%SystemRoot%\*
+%ProgramFiles%\*
+%ProgramFiles(x86)%\*
+%ProgramData%\*
+
+# 系统重要文件
+pagefile.sys
+hiberfil.sys
+swapfile.sys
+
+# 用户重要配置目录
+%USERPROFILE%\AppData\Local\Microsoft\*
+%USERPROFILE%\AppData\Roaming\Microsoft\*
+%APPDATA%\*
+%LOCALAPPDATA%\*
+
