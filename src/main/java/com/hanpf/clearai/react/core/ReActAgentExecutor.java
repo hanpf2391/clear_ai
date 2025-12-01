@@ -10,6 +10,7 @@ import com.hanpf.clearai.react.prompt.DynamicPromptBuilder;
 import com.hanpf.clearai.react.tools.ToolRegistry;
 import com.hanpf.clearai.utils.ClearAILogger;
 import com.hanpf.clearai.react.ui.ReActProgressDisplay;
+import com.hanpf.clearai.react.exception.InvalidAIResponseException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -106,13 +107,12 @@ public class ReActAgentExecutor {
             ClearAILogger.info("开始ReAct循环，用户输入: " + userInput);
         }
 
-        // 智能任务完成检测 - 避免不必要的循环
+        // 任务完成检测 - 只有用户明确表示完成时才停止
         if (isTaskCompleted(state)) {
-            String summary = generateFinalSummary(state);
             if (ENABLE_DEBUG_LOGGING) {
-                ClearAILogger.info("检测到任务已完成，直接生成最终答案");
+                ClearAILogger.info("检测到用户明确的完成信号，结束ReAct循环");
             }
-            return summary;
+            return "✅ 对话结束。感谢您使用CLEAR AI！";
         }
 
         // 计算实际需要的最大循环次数
@@ -159,21 +159,42 @@ public class ReActAgentExecutor {
                 progressDisplay.completeStep(String.format("获取到决策: %s", decisionPreview));
             }
 
-            // 3. 解析结构化决策
+            // 3. 解析结构化决策 - 严格模式
             if (ENABLE_PROGRESS_DISPLAY) {
                 progressDisplay.startStep("PARSE_DECISION", "📋 解析AI决策...");
             }
 
-            ReActDecision decision = parseDecision(aiDecision);
-            state.addDecision(decision);
+            ReActDecision decision;
+            try {
+                decision = parseDecision(aiDecision);
+                state.addDecision(decision);
 
-            if (ENABLE_PROGRESS_DISPLAY) {
-                if (decision.getThought() != null) {
-                    progressDisplay.showThinking(decision.getThought());
+                if (ENABLE_PROGRESS_DISPLAY) {
+                    if (decision.getThought() != null) {
+                        progressDisplay.showThinking(decision.getThought());
+                    }
+                    progressDisplay.completeStep(String.format("解析完成: %s",
+                        decision.isFinalAnswer() ? "最终答案" :
+                        decision.hasAction() ? "工具调用" : "无效决策"));
                 }
-                progressDisplay.completeStep(String.format("解析完成: %s",
-                    decision.isFinalAnswer() ? "最终答案" :
-                    decision.hasAction() ? "工具调用" : "无效决策"));
+            } catch (InvalidAIResponseException e) {
+                // 处理AI响应格式错误
+                ClearAILogger.error("AI响应格式错误: " + e.getReason());
+                if (ENABLE_DEBUG_LOGGING) {
+                    ClearAILogger.error("原始AI响应: " + e.getAiResponse());
+                }
+
+                // 重新构建一个纠正性的Prompt并重试
+                String correctivePrompt = buildCorrectivePrompt(aiDecision, e);
+                aiDecision = callAIWithTimeout(correctivePrompt);
+
+                // 第二次尝试解析
+                decision = parseDecision(aiDecision);
+                state.addDecision(decision);
+
+                if (ENABLE_PROGRESS_DISPLAY) {
+                    progressDisplay.completeStep("纠正后解析成功");
+                }
             }
 
             // 4. 执行决策
@@ -279,71 +300,61 @@ public class ReActAgentExecutor {
     }
 
     /**
-     * 解析AI返回的结构化决策
+     * 解析AI返回的结构化决策 - 严格模式
+     *
+     * 只接受标准的ReAct JSON格式：{ "thought": "...", "action": {...} } 或 { "thought": "...", "final_answer": "..." }
+     * 任何不符合此格式的响应都会抛出InvalidAIResponseException异常
      */
     private ReActDecision parseDecision(String aiResponse) throws Exception {
-        ReActDecision decision = new ReActDecision();
+        if (ENABLE_DEBUG_LOGGING) {
+            ClearAILogger.info("开始解析AI响应，长度: " + aiResponse.length());
+        }
 
         try {
-            // 检查编码相关的异常
-            if (aiResponse.contains("Conversion =") ||
-                aiResponse.contains("UnknownFormatConversionException") ||
-                aiResponse.contains("CharacterEncoding") ||
-                aiResponse.contains("UnsupportedCharsetException")) {
-
-                // 为编码错误创建友好的响应
-                String userFriendlyResponse = String.format(
-                    "👋 你好！我是CLEAR AI智能清理助手。\n\n" +
-                    "🚀 我可以帮你：\n" +
-                    "• 智能扫描和清理垃圾文件\n" +
-                    "• 分析磁盘空间使用情况\n" +
-                    "• 提供系统优化建议\n\n" +
-                    "💡 试试对我说：\n" +
-                    "• \"检查C盘空间\"\n" +
-                    "• \"扫描下载文件夹\"\n" +
-                    "• \"清理临时文件\""
-                );
-
-                decision.setFinalAnswer(userFriendlyResponse);
-                return decision;
-            }
-
-            // 检查是否是纯文本响应（不包含JSON）
-            if (!aiResponse.contains("{") || !aiResponse.contains("}")) {
-                // 纯文本响应，直接作为最终答案
-                decision.setFinalAnswer(aiResponse.trim());
-                return decision;
-            }
-
-            // 尝试提取JSON部分
+            // 提取JSON部分
             String jsonStr = extractJsonFromResponse(aiResponse);
 
             if (jsonStr.isEmpty()) {
-                // JSON提取失败，但响应可能包含有用信息
-                if (aiResponse.trim().length() > 10) {
-                    decision.setFinalAnswer(aiResponse.trim());
-                } else {
-                    decision.setFinalAnswer("抱歉，我没有理解您的请求。请重新描述您需要什么帮助。");
-                }
-                return decision;
+                throw new InvalidAIResponseException(
+                    "AI响应中未找到有效的JSON格式",
+                    aiResponse,
+                    "响应不包含有效的JSON结构"
+                );
             }
 
+            // 解析JSON
             JsonNode json = objectMapper.readTree(jsonStr);
 
-            // 解析思考过程
-            if (json.has("thought")) {
-                decision.setThought(json.get("thought").asText());
+            // 验证基本结构
+            if (!json.has("thought")) {
+                throw new InvalidAIResponseException(
+                    "JSON缺少必需的thought字段",
+                    jsonStr,
+                    "标准ReAct格式必须包含thought字段"
+                );
             }
 
-            // 解析最终答案
+            ReActDecision decision = new ReActDecision();
+            decision.setThought(json.get("thought").asText());
+
+            // 检查是否有最终答案
             if (json.has("final_answer")) {
                 decision.setFinalAnswer(json.get("final_answer").asText());
                 return decision;
             }
 
-            // 解析工具调用
+            // 检查是否有工具调用
             if (json.has("action")) {
                 JsonNode actionNode = json.get("action");
+
+                if (!actionNode.has("tool_name")) {
+                    throw new InvalidAIResponseException(
+                        "action缺少必需的tool_name字段",
+                        jsonStr,
+                        "工具调用必须包含tool_name字段"
+                    );
+                }
+
                 ReActAction action = new ReActAction();
                 action.setToolName(actionNode.get("tool_name").asText());
 
@@ -352,54 +363,62 @@ public class ReActAgentExecutor {
                 }
 
                 decision.setAction(action);
-            }
-
-            return decision;
-
-        } catch (java.util.UnknownFormatConversionException e) {
-            // 专门处理格式转换异常
-            ClearAILogger.error("字符编码转换异常: " + e.getMessage());
-
-            String encodingErrorResponse = String.format(
-                "🤖 AI服务状态:\n" +
-                "  提供商: 智普AI\n" +
-                "  模型: glm-4.5-air\n" +
-                "  连接状态: ✅ 正在处理中文编码问题\n\n" +
-                "🔧 系统优化中...\n" +
-                "👋 很抱歉出现编码问题，请重试您的请求。"
-            );
-
-            decision.setFinalAnswer(encodingErrorResponse);
-            return decision;
-
-        } catch (Exception e) {
-            // 检查是否为编码相关异常
-            String errorMessage = e.getMessage();
-            if (errorMessage != null && (
-                errorMessage.contains("Conversion =") ||
-                errorMessage.contains("UnknownFormatConversionException") ||
-                errorMessage.contains("CharacterEncoding") ||
-                errorMessage.contains("UnsupportedCharsetException"))) {
-
-                // 为编码异常创建友好的响应
-                String userFriendlyResponse = String.format(
-                    "🤖 AI服务状态:\n" +
-                    "  提供商: 智普AI\n" +
-                    "  模型: glm-4.5-air\n" +
-                    "  连接状态: ✅ 正在处理中文编码问题\n\n" +
-                    "🔧 系统优化中...\n" +
-                    "👋 很抱歉出现编码问题，请重试您的请求。"
-                );
-
-                decision.setFinalAnswer(userFriendlyResponse);
                 return decision;
             }
 
-            // JSON解析失败时，将响应作为最终答案处理
-            ClearAILogger.warn("JSON解析失败，使用文本响应: " + e.getMessage());
-            decision.setFinalAnswer(aiResponse.trim());
-            return decision;
+            // 既没有final_answer也没有action，格式不完整
+            throw new InvalidAIResponseException(
+                "JSON缺少必需的final_answer或action字段",
+                jsonStr,
+                "必须包含final_answer或action中的一个"
+            );
+
+        } catch (InvalidAIResponseException e) {
+            // 重新抛出我们自己的异常
+            throw e;
+        } catch (Exception e) {
+            // 其他异常包装为InvalidAIResponseException
+            throw new InvalidAIResponseException(
+                "JSON解析失败: " + e.getMessage(),
+                aiResponse,
+                "解析JSON时发生异常: " + e.getClass().getSimpleName()
+            );
         }
+    }
+
+    /**
+     * 构建纠正性Prompt - 当AI返回格式错误时使用
+     */
+    private String buildCorrectivePrompt(String invalidResponse, InvalidAIResponseException e) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("❌ **AI响应格式错误**\n\n");
+        prompt.append("您的响应不符合标准的ReAct JSON格式。\n\n");
+        prompt.append("**错误信息：**\n");
+        prompt.append(e.getReason()).append("\n\n");
+        prompt.append("**您的原始响应：**\n");
+        prompt.append("```\n").append(invalidResponse).append("\n```\n\n");
+        prompt.append("**正确格式要求：**\n");
+        prompt.append("```json\n");
+        prompt.append("{\n");
+        prompt.append("  \"thought\": \"您的思考过程，解释为什么需要执行这个行动\",\n");
+        prompt.append("  \"action\": {\n");
+        prompt.append("    \"tool_name\": \"工具名称\",\n");
+        prompt.append("    \"parameters\": {\n");
+        prompt.append("      \"参数名\": \"参数值\"\n");
+        prompt.append("    }\n");
+        prompt.append("  }\n");
+        prompt.append("}\n");
+        prompt.append("```\n\n");
+        prompt.append("或者，如果任务已完成：\n");
+        prompt.append("```json\n");
+        prompt.append("{\n");
+        prompt.append("  \"thought\": \"您的思考过程，说明为什么任务已经完成\",\n");
+        prompt.append("  \"final_answer\": \"给用户的最终回答\"\n");
+        prompt.append("}\n");
+        prompt.append("```\n\n");
+        prompt.append("请重新提供符合上述格式的响应。");
+
+        return prompt.toString();
     }
 
     /**
@@ -448,7 +467,7 @@ public class ReActAgentExecutor {
     }
 
     /**
-     * 执行工具调用
+     * 执行工具调用 - 纯业务逻辑，不包含UI显示
      */
     private String executeToolAction(ReActAction action) throws Exception {
         String toolName = action.getToolName();
@@ -460,13 +479,11 @@ public class ReActAgentExecutor {
         try {
             String result = toolRegistry.executeTool(toolName, action.getParameters());
 
-            // 检查是否是通信工具，如果是则特殊处理
-            if (isCommunicationTool(toolName)) {
-                boolean shouldPause = handleCommunicationTool(toolName, action.getParameters(), result);
-                if (shouldPause) {
-                    // 对于需要用户确认的工具，返回特殊标记让ReAct循环暂停
-                    throw new UserConfirmationRequiredException("等待用户确认");
-                }
+            // 检查是否是需要用户确认的工具
+            if (requiresUserConfirmation(toolName, action.getParameters())) {
+                // 返回结构化的用户确认信息，由UI层处理显示
+                String structuredResult = buildStructuredConfirmationResult(toolName, action.getParameters(), result);
+                throw new UserConfirmationRequiredException(structuredResult);
             }
 
             return result;
@@ -481,130 +498,34 @@ public class ReActAgentExecutor {
     }
 
     /**
-     * 检查是否是通信工具
+     * 检查工具是否需要用户确认
      */
-    private boolean isCommunicationTool(String toolName) {
-        return toolName.equals("send_intermediate_response") ||
-               toolName.equals("request_user_confirmation") ||
-               toolName.equals("report_progress") ||
-               toolName.equals("highlight_finding");
+    private boolean requiresUserConfirmation(String toolName, JsonNode parameters) {
+        if (!toolName.equals("request_user_confirmation")) {
+            return false;
+        }
+
+        // request_user_confirmation 工具总是需要暂停等待用户输入
+        return true;
     }
 
     /**
-     * 处理通信工具 - 直接向用户显示消息
-     * @return 是否需要暂停ReAct循环等待用户输入
+     * 构建结构化的用户确认结果
      */
-    private boolean handleCommunicationTool(String toolName, JsonNode parameters, String toolResult) {
-        try {
-            String message = "";
+    private String buildStructuredConfirmationResult(String toolName, JsonNode parameters, String toolResult) {
+        // 返回一个包含所有必要信息的结构化字符串
+        // 格式: CONFIRMATION:question|options
+        if (toolName.equals("request_user_confirmation") && parameters != null && parameters.has("question")) {
+            String question = parameters.get("question").asText();
+            String options = parameters.has("options") ? parameters.get("options").asText() : "";
 
-            switch (toolName) {
-                case "send_intermediate_response":
-                    if (parameters != null && parameters.has("message")) {
-                        message = parameters.get("message").asText();
-                        System.out.println("\n📢 " + message);
-                        System.out.flush();
-                    }
-                    return false; // 不需要暂停
-
-                case "request_user_confirmation":
-                    if (parameters != null && parameters.has("question")) {
-                        String question = parameters.get("question").asText();
-                        message = "❓ 请确认: " + question;
-
-                        if (parameters.has("options")) {
-                            String options = parameters.get("options").asText();
-                            message += "\n\n可选项:\n";
-                            String[] optionArray = options.split(",");
-                            for (int i = 0; i < optionArray.length; i++) {
-                                message += String.format("%d. %s\n", i + 1, optionArray[i].trim());
-                            }
-                        }
-
-                        System.out.println("\n" + message);
-                        System.out.print("👤 您的回复: ");
-                        System.out.flush();
-                    }
-                    return true; // 需要暂停等待用户输入
-
-                case "report_progress":
-                    if (parameters != null) {
-                        StringBuilder progressMsg = new StringBuilder();
-
-                        String currentStep = parameters.has("current_step") ?
-                            parameters.get("current_step").asText() : "未知";
-                        String totalSteps = parameters.has("total_steps") ?
-                            parameters.get("total_steps").asText() : "未知";
-                        String details = parameters.has("details") ?
-                            parameters.get("details").asText() : "";
-
-                        // 构建进度显示
-                        if (!"未知".equals(totalSteps)) {
-                            try {
-                                int current = Integer.parseInt(currentStep);
-                                int total = Integer.parseInt(totalSteps);
-                                int percentage = (current * 100) / total;
-
-                                progressMsg.append(String.format("⏳ 进度: [%s] %d%% (%d/%d)\n",
-                                    "=".repeat(Math.max(0, percentage / 10)), percentage, current, total));
-                            } catch (NumberFormatException e) {
-                                progressMsg.append(String.format("⏳ 步骤: %s / %s\n", currentStep, totalSteps));
-                            }
-                        } else {
-                            progressMsg.append(String.format("⏳ 当前步骤: %s\n", currentStep));
-                        }
-
-                        progressMsg.append(String.format("📍 %s", currentStep));
-
-                        if (!details.trim().isEmpty()) {
-                            progressMsg.append(String.format("\n📝 %s", details));
-                        }
-
-                        System.out.println("\n" + progressMsg.toString());
-                        System.out.flush();
-                    }
-                    return false; // 不需要暂停
-
-                case "highlight_finding":
-                    if (parameters != null && parameters.has("finding")) {
-                        String finding = parameters.get("finding").asText();
-                        String impact = parameters.has("impact") ?
-                            parameters.get("impact").asText() : "";
-                        String suggestion = parameters.has("suggestion") ?
-                            parameters.get("suggestion").asText() : "";
-
-                        StringBuilder highlightMsg = new StringBuilder();
-                        highlightMsg.append("⚠️ 重要发现:\n");
-                        highlightMsg.append(String.format("🔍 %s\n", finding));
-
-                        if (!impact.trim().isEmpty()) {
-                            highlightMsg.append(String.format("💡 影响: %s\n", impact));
-                        }
-
-                        if (!suggestion.trim().isEmpty()) {
-                            highlightMsg.append(String.format("💭 建议: %s", suggestion));
-                        }
-
-                        System.out.println("\n" + highlightMsg.toString());
-                        // 刷新输出流确保消息立即显示
-                        System.out.flush();
-                    }
-                    return false; // 不需要暂停
-
-                default:
-                    // 默认情况下直接显示工具结果
-                    System.out.println("\n📢 " + toolResult);
-                    System.out.flush();
-                    return false; // 默认不需要暂停
-            }
-        } catch (Exception e) {
-            ClearAILogger.error("处理通信工具时出错: " + e.getMessage(), e);
-            // 即使出错也要显示基本消息
-            System.out.println("\n📢 " + toolResult);
-            return false; // 出错时不需要暂停
+            return String.format("CONFIRMATION:%s|%s", question, options);
         }
+
+        return "CONFIRMATION:需要用户确认|";
     }
 
+    
     /**
      * 重置对话状态
      */
@@ -670,25 +591,7 @@ public class ReActAgentExecutor {
                lowerMessage.contains("不需要进一步的帮助");
     }
 
-    /**
-     * 判断是否有足够的目录信息
-     */
-    private boolean hasEnoughDirectoryInfo(ConversationState state) {
-        List<String> scanResults = state.getToolHistory("scan_directory");
-        if (scanResults.isEmpty()) {
-            return false;
-        }
-
-        // 检查最近的扫描结果是否包含详细信息
-        String latestScan = scanResults.get(scanResults.size() - 1);
-
-        // 如果扫描结果包含文件列表或大小信息，认为有足够信息
-        return latestScan.contains("找到") &&
-               (latestScan.contains("个文件") ||
-                latestScan.contains("MB") ||
-                latestScan.contains("字节"));
-    }
-
+    
     /**
      * 计算实际需要的最大循环次数
      * 简化为固定值，让AI自然地决定何时结束对话
@@ -700,56 +603,4 @@ public class ReActAgentExecutor {
     }
 
     
-    /**
-     * 生成最终摘要
-     * 基于已有的工具结果生成最终答案
-     */
-    private String generateFinalSummary(ConversationState state) {
-        StringBuilder summary = new StringBuilder();
-
-        // 优先显示结构化分析结果
-        if (state.hasToolBeenCalled("analyzeDirectoryForCleaning")) {
-            List<String> results = state.getToolHistory("analyzeDirectoryForCleaning");
-            if (!results.isEmpty()) {
-                summary.append("🚀 **目录分析完成！**\n\n");
-                summary.append(results.get(results.size() - 1)); // 显示最新结果
-                return summary.toString();
-            }
-        }
-
-        // 次优显示普通目录分析结果
-        if (state.hasToolBeenCalled("analyzeDirectory")) {
-            List<String> results = state.getToolHistory("analyzeDirectory");
-            if (!results.isEmpty()) {
-                summary.append("📊 **目录分析结果：**\n\n");
-                summary.append(results.get(results.size() - 1));
-                return summary.toString();
-            }
-        }
-
-        // 显示扫描结果摘要
-        if (state.hasToolBeenCalled("scan_directory")) {
-            List<String> results = state.getToolHistory("scan_directory");
-            if (!results.isEmpty()) {
-                summary.append("🔍 **扫描结果摘要：**\n\n");
-                String latestResult = results.get(results.size() - 1);
-
-                // 提取关键信息
-                if (latestResult.contains("找到")) {
-                    summary.append(latestResult);
-                } else {
-                    summary.append("已完成目录扫描，发现了一些文件。\n\n");
-                    summary.append("💡 **建议：** 如需详细分析，可以请求进一步的操作建议。");
-                }
-
-                return summary.toString();
-            }
-        }
-
-        // 默认摘要
-        summary.append("✅ **任务已完成！**\n\n");
-        summary.append("我已经完成了您的请求。如需进一步帮助，请告诉我。");
-
-        return summary.toString();
     }
-}
