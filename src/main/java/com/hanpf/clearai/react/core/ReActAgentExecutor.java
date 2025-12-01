@@ -234,17 +234,11 @@ public class ReActAgentExecutor {
                         ClearAILogger.info("工具执行完成，结果长度: " + toolResult.length() + " 字符");
                     }
                 } catch (UserConfirmationRequiredException e) {
-                    // 用户确认工具被调用，需要暂停并返回当前状态
-                    if (ENABLE_PROGRESS_DISPLAY) {
-                        progressDisplay.showToolResult(decision.getAction().getToolName(),
-                            "需要用户确认", false);
-                        progressDisplay.completeStep("暂停等待用户确认");
-                    }
-
+                    // 用户确认工具被调用，需要暂停并返回结构化信息
                     if (ENABLE_DEBUG_LOGGING) {
                         ClearAILogger.info("用户确认工具调用，暂停ReAct循环等待用户输入");
                     }
-                    return "🔄 等待用户确认，请继续对话...";
+                    return e.getMessage(); // 返回结构化的用户确认信息
                 } catch (Exception e) {
                     if (ENABLE_PROGRESS_DISPLAY) {
                         progressDisplay.showError("工具执行失败", e);
@@ -467,7 +461,7 @@ public class ReActAgentExecutor {
     }
 
     /**
-     * 执行工具调用 - 纯业务逻辑，不包含UI显示
+     * 执行工具调用 - 纯业务逻辑，返回结构化结果
      */
     private String executeToolAction(ReActAction action) throws Exception {
         String toolName = action.getToolName();
@@ -479,11 +473,16 @@ public class ReActAgentExecutor {
         try {
             String result = toolRegistry.executeTool(toolName, action.getParameters());
 
-            // 检查是否是需要用户确认的工具
-            if (requiresUserConfirmation(toolName, action.getParameters())) {
-                // 返回结构化的用户确认信息，由UI层处理显示
-                String structuredResult = buildStructuredConfirmationResult(toolName, action.getParameters(), result);
-                throw new UserConfirmationRequiredException(structuredResult);
+            // 如果是沟通工具，返回结构化结果让AI获得完整上下文
+            if (isCommunicationTool(toolName)) {
+                String structuredResult = buildCommunicationResult(toolName, action.getParameters(), result);
+
+                // 如果是用户确认工具，需要暂停等待用户输入
+                if (toolName.equals("request_user_confirmation")) {
+                    throw new UserConfirmationRequiredException(structuredResult);
+                }
+
+                return structuredResult;
             }
 
             return result;
@@ -498,31 +497,79 @@ public class ReActAgentExecutor {
     }
 
     /**
-     * 检查工具是否需要用户确认
+     * 检查是否是需要与用户交互的沟通工具
      */
-    private boolean requiresUserConfirmation(String toolName, JsonNode parameters) {
-        if (!toolName.equals("request_user_confirmation")) {
-            return false;
-        }
-
-        // request_user_confirmation 工具总是需要暂停等待用户输入
-        return true;
+    private boolean isCommunicationTool(String toolName) {
+        return toolName.equals("send_intermediate_response") ||
+               toolName.equals("request_user_confirmation") ||
+               toolName.equals("report_progress") ||
+               toolName.equals("highlight_finding");
     }
 
     /**
-     * 构建结构化的用户确认结果
+     * 构建沟通工具的结构化结果，让AI能够获得完整上下文
      */
-    private String buildStructuredConfirmationResult(String toolName, JsonNode parameters, String toolResult) {
-        // 返回一个包含所有必要信息的结构化字符串
-        // 格式: CONFIRMATION:question|options
-        if (toolName.equals("request_user_confirmation") && parameters != null && parameters.has("question")) {
-            String question = parameters.get("question").asText();
-            String options = parameters.has("options") ? parameters.get("options").asText() : "";
+    private String buildCommunicationResult(String toolName, JsonNode parameters, String toolResult) {
+        switch (toolName) {
+            case "send_intermediate_response":
+                if (parameters != null && parameters.has("message")) {
+                    String message = parameters.get("message").asText();
+                    return String.format("COMMUNICATION_MESSAGE:%s", message);
+                }
+                return "COMMUNICATION_MESSAGE:消息已发送";
 
-            return String.format("CONFIRMATION:%s|%s", question, options);
+            case "request_user_confirmation":
+                if (parameters != null && parameters.has("question")) {
+                    String question = parameters.get("question").asText();
+                    String options = parameters.has("options") ? parameters.get("options").asText() : "";
+                    return String.format("USER_CONFIRMATION_REQUEST:%s|%s", question, options);
+                }
+                return "USER_CONFIRMATION_REQUEST:需要用户确认|";
+
+            case "report_progress":
+                if (parameters != null) {
+                    StringBuilder progressInfo = new StringBuilder();
+                    String currentStep = parameters.has("current_step") ?
+                        parameters.get("current_step").asText() : "未知";
+                    String totalSteps = parameters.has("total_steps") ?
+                        parameters.get("total_steps").asText() : "未知";
+                    String details = parameters.has("details") ?
+                        parameters.get("details").asText() : "";
+
+                    progressInfo.append("PROGRESS_REPORT:");
+                    progressInfo.append("current_step=").append(currentStep);
+                    progressInfo.append("|total_steps=").append(totalSteps);
+                    if (!details.isEmpty()) {
+                        progressInfo.append("|details=").append(details);
+                    }
+                    return progressInfo.toString();
+                }
+                return "PROGRESS_REPORT:current_step=未知|total_steps=未知";
+
+            case "highlight_finding":
+                if (parameters != null && parameters.has("finding")) {
+                    String finding = parameters.get("finding").asText();
+                    String impact = parameters.has("impact") ?
+                        parameters.get("impact").asText() : "";
+                    String suggestion = parameters.has("suggestion") ?
+                        parameters.get("suggestion").asText() : "";
+
+                    StringBuilder highlightInfo = new StringBuilder();
+                    highlightInfo.append("HIGHLIGHT_FINDING:");
+                    highlightInfo.append("finding=").append(finding);
+                    if (!impact.isEmpty()) {
+                        highlightInfo.append("|impact=").append(impact);
+                    }
+                    if (!suggestion.isEmpty()) {
+                        highlightInfo.append("|suggestion=").append(suggestion);
+                    }
+                    return highlightInfo.toString();
+                }
+                return "HIGHLIGHT_FINDING:finding=未知";
+
+            default:
+                return toolResult;
         }
-
-        return "CONFIRMATION:需要用户确认|";
     }
 
     
