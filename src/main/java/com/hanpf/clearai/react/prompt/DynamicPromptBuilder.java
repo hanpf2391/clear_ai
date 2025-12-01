@@ -5,6 +5,9 @@ import com.hanpf.clearai.react.tools.ToolDefinition;
 
 import java.util.List;
 import java.util.Set;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 /**
  * 动态Prompt构建器 - 基于对话状态和上下文智能构建Prompt
@@ -18,49 +21,8 @@ import java.util.Set;
  */
 public class DynamicPromptBuilder {
 
-    // Prompt模板
-    private static final String SYSTEM_PROMPT_TEMPLATE = """
-        你是一个名为 CLEAR AI 的顶级智能电脑清理助手，基于 ReAct（Reasoning-Action）模式工作。
-
-        核心工作原理：
-        1. **思考 (Reasoning)**：分析用户需求，制定执行计划
-        2. **行动 (Action)**：调用工具执行具体操作
-        3. **观察 (Observation)**：根据工具结果调整策略
-        4. **循环执行**：直到任务完成，给出最终答案
-
-        可用工具：
-        %s
-
-        输出格式要求：
-        请严格按照以下JSON格式返回决策：
-
-        {
-          "thought": "你的思考过程，解释为什么需要执行这个行动或给出这个答案",
-          "action": {
-            "tool_name": "工具名称",
-            "parameters": {
-              "参数名": "参数值"
-            }
-          }
-        }
-
-        或者如果是最终答案：
-
-        {
-          "thought": "你的思考过程，说明为什么任务已经完成",
-          "final_answer": "给用户的最终回答"
-        }
-
-        重要规则：
-        1. 【沟通优先原则】在获得重要发现或执行耗时操作前后，优先使用 send_intermediate_response 向用户汇报进展和下一步计划
-        2. 每次只能调用一个工具
-        3. 如果需要更多信息，调用相应的扫描工具
-        4. 只有在任务完全完成时才使用 final_answer
-        5. 保持专业、友好的语气
-        6. 优先使用扫描工具了解情况，再执行清理操作
-        7. 确保所有操作都有明确目的
-        8. 【分步汇报】复杂任务应拆分为多个阶段，每阶段结束后与用户沟通确认
-        """;
+    // Prompt模板文件路径
+    private static final String SYSTEM_PROMPT_FILE = "prompts/main-system-prompt.md";
 
     private static final String CONTEXT_INJECTION_TEMPLATE = """
 
@@ -80,7 +42,7 @@ public class DynamicPromptBuilder {
         === 请基于以上上下文做出决策 ===
         """;
 
-    private static final int MAX_PROMPT_LENGTH = 8000; // 最大Prompt长度限制
+    private static final int MAX_PROMPT_LENGTH = 80000; // 最大Prompt长度限制
 
     /**
      * 构建完整的Prompt
@@ -105,24 +67,52 @@ public class DynamicPromptBuilder {
      * 构建系统提示（包含工具描述）
      */
     private String buildSystemPrompt(List<ToolDefinition> tools) {
-        StringBuilder toolsDescription = new StringBuilder();
+        try {
+            // 构建工具描述
+            StringBuilder toolsDescription = new StringBuilder();
 
-        for (ToolDefinition tool : tools) {
-            toolsDescription.append(String.format("- **%s**: %s\n",
-                tool.getName(), tool.getDescription()));
+            for (ToolDefinition tool : tools) {
+                toolsDescription.append(String.format("- **%s**: %s\n",
+                    tool.getName(), tool.getDescription()));
 
-            if (!tool.getParameters().isEmpty()) {
-                toolsDescription.append("  参数要求：\n");
-                for (ToolDefinition.Parameter param : tool.getParameters()) {
-                    String required = param.isRequired() ? "（必需）" : "（可选）";
-                    toolsDescription.append(String.format("  - %s: %s %s\n",
-                        param.getName(), param.getDescription(), required));
+                if (!tool.getParameters().isEmpty()) {
+                    toolsDescription.append("  参数要求：\n");
+                    for (ToolDefinition.Parameter param : tool.getParameters()) {
+                        String required = param.isRequired() ? "（必需）" : "（可选）";
+                        toolsDescription.append(String.format("  - %s: %s %s\n",
+                            param.getName(), param.getDescription(), required));
+                    }
                 }
+                toolsDescription.append("\n");
             }
-            toolsDescription.append("\n");
-        }
 
-        return String.format(SYSTEM_PROMPT_TEMPLATE, toolsDescription.toString());
+            // 读取系统提示词文件
+            String basePrompt = loadPromptFromFile(SYSTEM_PROMPT_FILE);
+            if (basePrompt == null) {
+                // 如果文件读取失败，使用备用简单提示词
+                basePrompt = "你是一个智能电脑清理助手，基于ReAct模式工作。";
+            }
+
+            return String.format(basePrompt, toolsDescription.toString());
+        } catch (Exception e) {
+            // 降级处理：如果读取失败，使用基本提示词
+            return "你是一个智能电脑清理助手。请提供专业的清理建议。";
+        }
+    }
+
+    /**
+     * 从文件加载提示词
+     */
+    private String loadPromptFromFile(String filePath) {
+        try {
+            String basePath = System.getProperty("user.dir");
+            String fullPath = Paths.get(basePath, filePath).toString();
+
+            return Files.readString(Paths.get(fullPath));
+        } catch (IOException e) {
+            System.err.println("无法读取提示词文件 " + filePath + ": " + e.getMessage());
+            return null;
+        }
     }
 
     /**
